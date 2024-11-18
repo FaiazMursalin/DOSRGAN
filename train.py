@@ -266,7 +266,7 @@ def train_gan_model(generator, discriminator, train_loader, val_loader, num_epoc
     optimizer_G = optim.AdamW(generator.parameters(), lr=0.0001, betas=(0.9, 0.999), weight_decay=0.01)
     optimizer_D = optim.AdamW(discriminator.parameters(), lr=0.0001, betas=(0.9, 0.999), weight_decay=0.01)
 
-    scaler = torch.amp.GradScaler('cuda')
+    scaler = torch.amp.GradScaler()
 
     def warmup_lr_scheduler(epoch):
         if epoch < 10:
@@ -300,7 +300,7 @@ def train_gan_model(generator, discriminator, train_loader, val_loader, num_epoc
             hr_imgs = hr_imgs.to(device)
 
             # Train Discriminator
-            with torch.cuda.amp.autocast('cuda'):
+            with torch.amp.autocast(device_type='cuda', dtype=torch.float16):
                 optimizer_D.zero_grad()
                 real_output = discriminator(hr_imgs)
                 d_loss_real = adversarial_criterion(real_output, real_label)
@@ -316,7 +316,7 @@ def train_gan_model(generator, discriminator, train_loader, val_loader, num_epoc
             scaler.step(optimizer_D)
 
             # Train Generator
-            with torch.cuda.amp.autocast('cuda'):
+            with torch.amp.autocast(device_type='cuda', dtype=torch.float16):
                 optimizer_G.zero_grad()
                 sr_imgs = generator(lr_imgs)
                 fake_output = discriminator(sr_imgs)
