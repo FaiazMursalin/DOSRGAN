@@ -1,179 +1,144 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-import torchvision.models as models
+import numpy as np
 
-
-class PerceptualLoss(nn.Module):
-    def __init__(self):
-        super().__init__()
-        vgg = models.vgg19(weights='IMAGENET1K_V1').features[:36]
-        self.vgg = nn.Sequential(*[vgg[i] for i in range(36)]).eval()
-        for param in self.vgg.parameters():
-            param.requires_grad = False
-
-    def forward(self, sr, hr):
-        vgg_sr = self.vgg(sr)
-        vgg_hr = self.vgg(hr)
-        return F.mse_loss(vgg_sr, vgg_hr)
-
-
-class ResidualDenseBlock(nn.Module):
-    def __init__(self, n_filters):
-        super().__init__()
-        growth_channels = 32
-        self.convs = nn.ModuleList()
-        for i in range(5):
-            in_channels = n_filters + i * growth_channels
-            self.convs.append(
-                nn.Sequential(
-                    nn.Conv2d(in_channels, growth_channels, 3, 1, 1),
-                    nn.LeakyReLU(0.2, True)
-                )
-            )
-        self.conv_last = nn.Conv2d(n_filters + 5 * growth_channels, n_filters, 1)
-
-    def forward(self, x):
-        inputs = [x]
-        for conv in self.convs:
-            x = conv(torch.cat(inputs, 1))
-            inputs.append(x)
-        return self.conv_last(torch.cat(inputs, 1)) * 0.2 + inputs[0]
-
-
-class RRDB(nn.Module):
-    def __init__(self, n_filters):
-        super().__init__()
-        self.dense_blocks = nn.ModuleList([
-            ResidualDenseBlock(n_filters) for _ in range(3)
-        ])
-
-    def forward(self, x):
-        out = x
-        for block in self.dense_blocks:
-            out = block(out)
-        return out * 0.2 + x
-
-
-class ChannelAttention(nn.Module):
-    def __init__(self, channels, reduction=16):
-        super().__init__()
+class SELayer(nn.Module):
+    def __init__(self, channel, reduction=16):
+        super(SELayer, self).__init__()
         self.avg_pool = nn.AdaptiveAvgPool2d(1)
-        self.max_pool = nn.AdaptiveMaxPool2d(1)
         self.fc = nn.Sequential(
-            nn.Conv2d(channels, channels // reduction, 1),
-            nn.ReLU(True),
-            nn.Conv2d(channels // reduction, channels, 1),
+            nn.Linear(channel, channel // reduction, bias=False),
+            nn.ReLU(inplace=False),
+            nn.Linear(channel // reduction, channel, bias=False),
             nn.Sigmoid()
         )
 
     def forward(self, x):
-        avg_out = self.fc(self.avg_pool(x))
-        max_out = self.fc(self.max_pool(x))
-        return x * (avg_out + max_out)
+        b, c, _, _ = x.size()
+        y = self.avg_pool(x).view(b, c)
+        y = self.fc(y).view(b, c, 1, 1)
+        return x * y.expand_as(x)
 
-
-class HybridRRDBNet(nn.Module):
-    def __init__(self, scale_factor=2, n_filters=256, n_blocks=23):
-        super().__init__()
-        self.scale_factor = scale_factor
-
-        # Initial feature extraction
-        self.conv_first = nn.Conv2d(3, n_filters, 3, 1, 1)
-
-        # RRDB blocks
-        self.RRDB_blocks = nn.ModuleList([
-            RRDB(n_filters) for _ in range(n_blocks)
-        ])
-
-        # Channel attention blocks
-        self.ca_blocks = nn.ModuleList([
-            ChannelAttention(n_filters) for _ in range(4)
-        ])
-
-        # Trunk branch
-        self.trunk_conv = nn.Conv2d(n_filters, n_filters, 3, 1, 1)
-
-        # Upsampling
-        n_upsamples = int(torch.log2(torch.tensor(scale_factor)))
-        self.upsampling = nn.ModuleList()
-        for _ in range(n_upsamples):
-            self.upsampling.extend([
-                nn.Conv2d(n_filters, n_filters * 4, 3, 1, 1),
-                nn.PixelShuffle(2),
-                nn.LeakyReLU(0.2, True)
-            ])
-
-        self.conv_hr = nn.Conv2d(n_filters, n_filters, 3, 1, 1)
-        self.conv_last = nn.Conv2d(n_filters, 3, 3, 1, 1)
-        self.lrelu = nn.LeakyReLU(negative_slope=0.2, inplace=True)
+class EnhancedResidualBlock(nn.Module):
+    def __init__(self, n_filters):
+        super(EnhancedResidualBlock, self).__init__()
+        self.conv1 = nn.Conv2d(n_filters, n_filters * 2, kernel_size=3, padding=1)
+        self.bn1 = nn.BatchNorm2d(n_filters * 2)
+        self.relu = nn.ReLU(inplace=False)
+        self.conv2 = nn.Conv2d(n_filters * 2, n_filters, kernel_size=3, padding=1)
+        self.bn2 = nn.BatchNorm2d(n_filters)
+        self.se = SELayer(n_filters)
 
     def forward(self, x):
-        fea = self.conv_first(x)
-        trunk = fea
-
-        # RRDB blocks with channel attention
-        for i, block in enumerate(self.RRDB_blocks):
-            trunk = block(trunk)
-            if i % 6 == 5:  # Apply CA every 6 blocks
-                ca_idx = i // 6
-                if ca_idx < len(self.ca_blocks):
-                    trunk = self.ca_blocks[ca_idx](trunk)
-
-        trunk = self.trunk_conv(trunk)
-        fea = fea + trunk
-
-        # Upsampling
-        for up_block in self.upsampling:
-            fea = up_block(fea)
-
-        out = self.conv_last(self.lrelu(self.conv_hr(fea)))
+        identity = x
+        out = self.conv1(x)
+        out = self.bn1(out)
+        out = self.relu(out)
+        out = self.conv2(out)
+        out = self.bn2(out)
+        out = self.se(out)
+        out = out + identity
+        out = self.relu(out)
         return out
 
+class ImprovedSRCNN(nn.Module):
+    def __init__(self, scale_factor=2):
+        super(ImprovedSRCNN, self).__init__()
 
-class Discriminator(nn.Module):
-    def __init__(self, input_channels=3):
-        super().__init__()
+        # Initial Feature Extraction
+        self.initial_conv = nn.Sequential(
+            nn.Conv2d(3, 128, kernel_size=3, padding=1),
+            nn.ReLU(inplace=False)
+        )
 
-        def discriminator_block(in_filters, out_filters, stride=1, normalize=True):
-            layers = [nn.Conv2d(in_filters, out_filters, 3, stride, 1)]
-            if normalize:
-                layers.append(nn.BatchNorm2d(out_filters))
-            layers.append(nn.LeakyReLU(0.2, True))
-            return layers
+        # Deep residual blocks
+        self.residual_layers = nn.ModuleList([
+            EnhancedResidualBlock(128) for _ in range(8)
+        ])
 
-        self.model = nn.Sequential(
-            *discriminator_block(input_channels, 64, stride=2, normalize=False),
-            *discriminator_block(64, 128, stride=2),
-            *discriminator_block(128, 256, stride=2),
-            *discriminator_block(256, 512, stride=1),
-            nn.Conv2d(512, 1, 3, padding=1)
+        # Feature fusion with same padding
+        self.fusion = nn.Sequential(
+            nn.Conv2d(128, 128, kernel_size=3, padding=1),
+            nn.BatchNorm2d(128),
+            nn.ReLU(inplace=False),
+            SELayer(128)
+        )
+
+        # Progressive upsampling
+        n_upsamples = int(np.log2(scale_factor))
+        self.upsampling = nn.ModuleList()
+        for _ in range(n_upsamples):
+            self.upsampling.append(nn.Sequential(
+                nn.Conv2d(128, 512, kernel_size=3, padding=1),
+                nn.PixelShuffle(2),
+                SELayer(128),
+                nn.ReLU(inplace=False)
+            ))
+
+        # Final reconstruction
+        self.final = nn.Sequential(
+            nn.Conv2d(128, 64, kernel_size=3, padding=1),
+            nn.ReLU(inplace=False),
+            nn.Conv2d(64, 3, kernel_size=3, padding=1)
         )
 
     def forward(self, x):
-        return self.model(x)
+        # Initial feature extraction
+        x = self.initial_conv(x)
+        residual = x
 
+        # Residual blocks with dense connections
+        features = []
+        for res_block in self.residual_layers:
+            x = res_block(x)
+            features.append(x)
+
+        # Feature fusion
+        x = torch.cat(features[-3:], dim=1)  # Use last 3 features
+        x = nn.Conv2d(128 * 3, 128, kernel_size=1).to(x.device)(x)  # 1x1 conv to reduce channels
+        x = self.fusion(x)
+
+        # Global residual connection
+        x = x + residual
+
+        # Progressive upsampling
+        for up_block in self.upsampling:
+            x = up_block(x)
+
+        # Final reconstruction
+        return self.final(x)
+
+class Discriminator(nn.Module):
+    def __init__(self):
+        super(Discriminator, self).__init__()
+
+        def discriminator_block(in_channels, out_channels, stride=1):
+            return nn.Sequential(
+                nn.Conv2d(in_channels, out_channels, 3, stride, 1),
+                nn.BatchNorm2d(out_channels),
+                nn.LeakyReLU(0.2, inplace=False)
+            )
+
+        self.model = nn.Sequential(
+            discriminator_block(3, 64, 2),
+            discriminator_block(64, 128, 2),
+            discriminator_block(128, 256, 2),
+            discriminator_block(256, 512, 1),
+            nn.AdaptiveAvgPool2d(1),
+            nn.Conv2d(512, 1024, 1),
+            nn.LeakyReLU(0.2, inplace=False),
+            nn.Conv2d(1024, 1, 1),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        return self.model(x).view(-1)
 
 class ContentLoss(nn.Module):
     def __init__(self):
-        super().__init__()
+        super(ContentLoss, self).__init__()
         self.l1_loss = nn.L1Loss()
-        self.perceptual_loss = PerceptualLoss()
+        self.mse_loss = nn.MSELoss()
 
-    def forward(self, sr, hr, gan_loss=None):
-        l1 = self.l1_loss(sr, hr)
-        percep = self.perceptual_loss(sr, hr)
-
-        if gan_loss is not None:
-            # 0.8 L1 + 0.15 Perceptual + 0.05 GAN for balance
-            return 0.8 * l1 + 0.15 * percep + 0.05 * gan_loss
-        return l1 + 0.1 * percep
-
-
-def create_model(scale_factor=2):
-    generator = HybridRRDBNet(scale_factor=scale_factor)
-    discriminator = Discriminator()
-    content_loss = ContentLoss()
-    adversarial_loss = nn.BCEWithLogitsLoss()
-
-    return generator, discriminator, content_loss, adversarial_loss
+    def forward(self, sr, hr):
+        return 0.5 * self.l1_loss(sr, hr) + 0.5 * self.mse_loss(sr, hr)

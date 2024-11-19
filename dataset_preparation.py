@@ -11,12 +11,21 @@ def create_patches(img, patch_size=96, stride=48):
     patches = []
     w, h = img.size
 
+    # Extract patches with augmentation
     for i in range(0, h - patch_size + 1, stride):
         for j in range(0, w - patch_size + 1, stride):
             patch = img.crop((j, i, j + patch_size, i + patch_size))
+
+            # Original patch
             patches.append(patch)
+
+            # Horizontal flip
             patches.append(patch.transpose(Image.FLIP_LEFT_RIGHT))
+
+            # Vertical flip
             patches.append(patch.transpose(Image.FLIP_TOP_BOTTOM))
+
+            # 90-degree rotation
             patches.append(patch.rotate(90))
 
     return patches
@@ -33,6 +42,7 @@ def create_dataset_structure(base_path, dataset_name, scale_factors):
             scale_path = dataset_path / f'x{scale}'
             hr_path = scale_path / 'hr'
             lr_path = scale_path / 'lr'
+
             hr_path.mkdir(parents=True, exist_ok=True)
             lr_path.mkdir(parents=True, exist_ok=True)
             print(f"Created directories for scale {scale}")
@@ -42,40 +52,57 @@ def create_dataset_structure(base_path, dataset_name, scale_factors):
 
 
 def process_image(img_path, output_dir, scale_factor, patch_size=96, stride=48, is_training=True):
-    """Process a single image and save its HR and LR patches."""
+    """
+    Process a single image and save its HR and LR patches.
+    Added data augmentation and quality checks.
+    """
     try:
         print(f"\nProcessing image: {img_path}")
+
+        # Read image in RGB mode
         img = Image.open(img_path).convert('RGB')
+
+        # Check if image is too small
         w, h = img.size
         min_size = patch_size * 2
-
         if w < min_size or h < min_size:
             print(f"Skipping {img_path} - image too small ({w}x{h} < {min_size}x{min_size})")
             return
 
         if is_training:
+            # For training images, create patches with augmentation
             hr_patches = create_patches(img, patch_size, stride)
 
             for idx, hr_patch in enumerate(hr_patches):
+                # Create LR patch by downscaling
                 w, h = hr_patch.size
                 lr_size = (w // scale_factor, h // scale_factor)
 
+                # Enhanced downscaling process
+                # First apply Gaussian blur to prevent aliasing
                 hr_np = np.array(hr_patch)
                 blurred = cv2.GaussianBlur(hr_np, (5, 5), 0.5)
                 hr_blurred = Image.fromarray(blurred)
+
+                # Downscale with bicubic interpolation
                 lr_patch = hr_blurred.resize(lr_size, Image.BICUBIC)
 
+                # Quality check - skip patches with low variance
                 lr_np = np.array(lr_patch)
-                if lr_np.std() < 10:
+                if lr_np.std() < 10:  # Skip low-contrast patches
                     continue
 
+                # Save patches
                 img_name = Path(img_path).stem
                 hr_path = output_dir / f'x{scale_factor}/hr/{img_name}_patch_{idx}.png'
                 lr_path = output_dir / f'x{scale_factor}/lr/{img_name}_patch_{idx}.png'
 
-                hr_patch.save(hr_path, 'PNG', quality=100)
+                hr_patch.save(hr_path, 'PNG', quality=100)  # Save HR with maximum quality
                 lr_patch.save(lr_path, 'PNG')
+
         else:
+            # For validation/test images, process whole image
+            # Add padding if needed to make dimension divisible by scale factor
             w, h = img.size
             new_w = ((w + scale_factor - 1) // scale_factor) * scale_factor
             new_h = ((h + scale_factor - 1) // scale_factor) * scale_factor
@@ -85,16 +112,19 @@ def process_image(img_path, output_dir, scale_factor, patch_size=96, stride=48, 
                            (new_w - w + 1) // 2, (new_h - h + 1) // 2)
                 img = ImageOps.expand(img, padding, fill=0)
 
+            # Apply Gaussian blur before downscaling
             img_np = np.array(img)
             blurred = cv2.GaussianBlur(img_np, (5, 5), 0.5)
             img_blurred = Image.fromarray(blurred)
 
+            # Save HR image
             img_name = Path(img_path).stem
             hr_path = output_dir / f'x{scale_factor}/hr/{img_name}.png'
             lr_path = output_dir / f'x{scale_factor}/lr/{img_name}.png'
 
             img.save(hr_path, 'PNG', quality=100)
 
+            # Create and save LR image
             lr_size = (new_w // scale_factor, new_h // scale_factor)
             lr_img = img_blurred.resize(lr_size, Image.BICUBIC)
             lr_img.save(lr_path, 'PNG')
@@ -106,7 +136,9 @@ def process_image(img_path, output_dir, scale_factor, patch_size=96, stride=48, 
 
 def prepare_dataset(source_dir, output_base_dir, dataset_name, scale_factors=[2, 3, 4],
                     patch_size=96, stride=48, is_training=True):
-    """Prepare the complete dataset with improved patch extraction and processing."""
+    """
+    Prepare the complete dataset with improved patch extraction and processing.
+    """
     try:
         print(f"\nPreparing dataset: {dataset_name}")
         print(f"Source directory: {source_dir}")
@@ -121,6 +153,7 @@ def prepare_dataset(source_dir, output_base_dir, dataset_name, scale_factors=[2,
         source_path = Path(source_dir)
         output_dir = Path(output_base_dir) / dataset_name
 
+        # Extended list of valid image extensions
         valid_extensions = {'.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.webp'}
         image_files = [f for f in source_path.glob('*')
                        if f.suffix.lower() in valid_extensions]
@@ -131,6 +164,7 @@ def prepare_dataset(source_dir, output_base_dir, dataset_name, scale_factors=[2,
             print("Warning: No valid images found in source directory!")
             return
 
+        # Process images with progress bar
         for img_path in tqdm(image_files, desc="Processing images"):
             for scale_factor in scale_factors:
                 process_image(
@@ -150,11 +184,11 @@ if __name__ == '__main__':
     # Configuration
     scale_factors = [2, 3, 4]
     base_output_dir = './dataset_improved'
-    patch_size = 96
-    stride = 48
+    patch_size = 96  # Increased patch size
+    stride = 48  # Increased stride
 
     try:
-        # Prepare training dataset (General100)
+        # Prepare training dataset (General100) with patches
         prepare_dataset(
             source_dir='data/General100',
             output_base_dir=base_output_dir,
@@ -165,7 +199,7 @@ if __name__ == '__main__':
             is_training=True
         )
 
-        # Prepare evaluation dataset (Set5)
+        # Prepare evaluation dataset (Set5) without patches
         prepare_dataset(
             source_dir='data/Set5/original',
             output_base_dir=base_output_dir,
