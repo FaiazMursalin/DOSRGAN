@@ -68,6 +68,38 @@ def calculate_ssim(img1, img2, window_size=11):
     return ssim.mean()
 
 
+def calculate_ifc(img1, img2, window_size=11):
+    """
+    Calculate Information Fidelity Criterion (IFC) between two images
+    """
+    # Convert to YCbCr and use Y channel only
+    img1_y = 0.299 * img1[0] + 0.587 * img1[1] + 0.114 * img1[2]
+    img2_y = 0.299 * img2[0] + 0.587 * img2[1] + 0.114 * img2[2]
+
+    # Create sliding windows
+    kernel = torch.ones(1, 1, window_size, window_size).to(img1.device) / (window_size ** 2)
+
+    # Calculate local means
+    mu1 = nn.functional.conv2d(img1_y.unsqueeze(0).unsqueeze(0), kernel, padding=window_size // 2)
+    mu2 = nn.functional.conv2d(img2_y.unsqueeze(0).unsqueeze(0), kernel, padding=window_size // 2)
+
+    # Calculate local variances
+    sigma1_sq = nn.functional.conv2d(img1_y.unsqueeze(0).unsqueeze(0) ** 2, kernel, padding=window_size // 2) - mu1 ** 2
+    sigma2_sq = nn.functional.conv2d(img2_y.unsqueeze(0).unsqueeze(0) ** 2, kernel, padding=window_size // 2) - mu2 ** 2
+    sigma12 = nn.functional.conv2d((img1_y * img2_y).unsqueeze(0).unsqueeze(0), kernel,
+                                   padding=window_size // 2) - mu1 * mu2
+
+    # Constants to avoid division by zero
+    C1 = 0.01 ** 2
+    C2 = 0.03 ** 2
+
+    # Calculate mutual information
+    numerator = torch.log2(1 + (sigma12 ** 2 + C2) / (sigma1_sq * sigma2_sq + C1))
+
+    # Return mean IFC value
+    return numerator.mean()
+
+
 def train_gan_model(generator, discriminator, train_loader, val_loader, num_epochs, device, scale_factor):
     # Loss functions
     content_criterion = ContentLoss().to(device)
@@ -83,7 +115,7 @@ def train_gan_model(generator, discriminator, train_loader, val_loader, num_epoc
 
     history = {
         'train_loss_G': [], 'train_loss_D': [],
-        'val_loss': [], 'val_psnr': [], 'val_ssim': []
+        'val_loss': [], 'val_psnr': [], 'val_ssim': [], 'val_ifc': []
     }
 
     best_psnr = 0
@@ -163,6 +195,7 @@ def train_gan_model(generator, discriminator, train_loader, val_loader, num_epoc
         total_val_loss = 0
         total_val_psnr = 0
         total_val_ssim = 0
+        total_val_ifc = 0
 
         print("\nValidating...")
         with torch.no_grad():
@@ -176,17 +209,21 @@ def train_gan_model(generator, discriminator, train_loader, val_loader, num_epoc
                 for i in range(sr_imgs.size(0)):
                     psnr_val = calculate_psnr(sr_imgs[i], hr_imgs[i])
                     ssim_val = calculate_ssim(sr_imgs[i], hr_imgs[i])
+                    ifc_val = calculate_ifc(sr_imgs[i], hr_imgs[i])
                     total_val_psnr += psnr_val
                     total_val_ssim += ssim_val
+                    total_val_ifc += ifc_val
 
         # Calculate averages
         avg_val_loss = total_val_loss / len(val_loader)
         avg_val_psnr = total_val_psnr / len(val_loader.dataset)
         avg_val_ssim = total_val_ssim / len(val_loader.dataset)
+        avg_val_ifc = total_val_ifc / len(val_loader.dataset)
 
         history['val_loss'].append(avg_val_loss)
         history['val_psnr'].append(avg_val_psnr)
         history['val_ssim'].append(avg_val_ssim)
+        history['val_ifc'].append(avg_val_ifc)
 
         print(f'\nEpoch {epoch + 1}/{num_epochs} Results:')
         print(f'G Loss: {avg_train_loss_G:.6f}')
@@ -194,6 +231,7 @@ def train_gan_model(generator, discriminator, train_loader, val_loader, num_epoc
         print(f'Val Loss: {avg_val_loss:.6f}')
         print(f'Val PSNR: {avg_val_psnr:.2f}')
         print(f'Val SSIM: {avg_val_ssim:.4f}')
+        print(f'Val IFC: {avg_val_ifc:.4f}')
 
         if avg_val_psnr > best_psnr:
             best_psnr = avg_val_psnr
@@ -205,18 +243,20 @@ def train_gan_model(generator, discriminator, train_loader, val_loader, num_epoc
                 'optimizer_D_state_dict': optimizer_D.state_dict(),
                 'best_psnr': best_psnr,
                 'best_ssim': avg_val_ssim,
-            },  model_save_path)
-            print(f'Saved model with PSNR: {best_psnr:.2f}, SSIM: {avg_val_ssim:.4f}')
+                'best_ifc': avg_val_ifc,
+            }, model_save_path)
+            print(f'Saved model with PSNR: {best_psnr:.2f}, SSIM: {avg_val_ssim:.4f}, IFC: {avg_val_ifc:.4f}')
 
     return history
+
 
 def plot_training_curves(history):
     epochs = range(1, len(history['train_loss_G']) + 1)
 
-    plt.figure(figsize=(20, 5))
+    plt.figure(figsize=(25, 5))
 
     # Generator and Discriminator Loss
-    plt.subplot(1, 4, 1)
+    plt.subplot(1, 5, 1)
     plt.plot(epochs, history['train_loss_G'], 'b-', label='Generator Loss')
     plt.plot(epochs, history['train_loss_D'], 'r-', label='Discriminator Loss')
     plt.title('Generator and Discriminator Loss')
@@ -225,46 +265,56 @@ def plot_training_curves(history):
     plt.legend()
 
     # Validation Loss
-    plt.subplot(1, 4, 2)
+    plt.subplot(1, 5, 2)
     plt.plot(epochs, history['val_loss'], 'g-')
     plt.title('Validation Loss')
     plt.xlabel('Epoch')
     plt.ylabel('Loss')
 
     # PSNR
-    plt.subplot(1, 4, 3)
+    plt.subplot(1, 5, 3)
     plt.plot(epochs, history['val_psnr'], 'm-')
     plt.title('PSNR on Validation Set')
     plt.xlabel('Epoch')
     plt.ylabel('PSNR (dB)')
 
     # SSIM
-    plt.subplot(1, 4, 4)
+    plt.subplot(1, 5, 4)
     plt.plot(epochs, history['val_ssim'], 'y-')
     plt.title('SSIM on Validation Set')
     plt.xlabel('Epoch')
     plt.ylabel('SSIM')
 
+    # IFC
+    plt.subplot(1, 5, 5)
+    plt.plot(epochs, history['val_ifc'], 'c-')
+    plt.title('IFC on Validation Set')
+    plt.xlabel('Epoch')
+    plt.ylabel('IFC')
+
     plt.tight_layout()
     plt.savefig('training_curves_gan.png')
     plt.close()
 
+
 def save_metrics(history, filename='metrics_history_gan.txt'):
     """Save metrics to a file"""
     with open(filename, 'w') as f:
-        f.write("Epoch,Generator Loss,Discriminator Loss,Val Loss,PSNR,SSIM\n")
+        f.write("Epoch,Generator Loss,Discriminator Loss,Val Loss,PSNR,SSIM,IFC\n")
         for i in range(len(history['train_loss_G'])):
             f.write(f"{i + 1},{history['train_loss_G'][i]:.6f},"
                    f"{history['train_loss_D'][i]:.6f},"
                    f"{history['val_loss'][i]:.6f},"
                    f"{history['val_psnr'][i]:.2f},"
-                   f"{history['val_ssim'][i]:.4f}\n")
+                   f"{history['val_ssim'][i]:.4f},"
+                   f"{history['val_ifc'][i]:.4f}\n")
+
 
 if __name__ == "__main__":
     # Configuration
     scale_factor = 2
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    batch_size = 16
+    batch_size = 32
     num_epochs = 300
 
     print(f"Using device: {device}")

@@ -1,0 +1,4 @@
+# Ignore dataset directory
+data/
+dataset_improved/**
+improved_srcnn_gan_x2.pth

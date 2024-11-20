@@ -2,22 +2,34 @@ import torch
 import torch.nn as nn
 import numpy as np
 
+
+import torch
+import torch.nn as nn
+
 class SELayer(nn.Module):
-    def __init__(self, channel, reduction=16):
+    def __init__(self, channel, reduction=8):
         super(SELayer, self).__init__()
         self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.max_pool = nn.AdaptiveMaxPool2d(1)
+        # Adjust input size to account for concatenated avg_pool and max_pool outputs
         self.fc = nn.Sequential(
-            nn.Linear(channel, channel // reduction, bias=False),
-            nn.ReLU(inplace=False),
+            nn.Linear(channel * 2, channel // reduction, bias=False),
+            nn.ReLU(inplace=True),
             nn.Linear(channel // reduction, channel, bias=False),
             nn.Sigmoid()
         )
 
     def forward(self, x):
         b, c, _, _ = x.size()
-        y = self.avg_pool(x).view(b, c)
+        # Process both average and max pooling
+        y_avg = self.avg_pool(x).view(b, c)
+        y_max = self.max_pool(x).view(b, c)
+        # Concatenate the pooling results
+        y = torch.cat([y_avg, y_max], dim=1)
+        # Apply fully connected layers and reshape
         y = self.fc(y).view(b, c, 1, 1)
         return x * y.expand_as(x)
+
 
 class EnhancedResidualBlock(nn.Module):
     def __init__(self, n_filters):
@@ -41,19 +53,20 @@ class EnhancedResidualBlock(nn.Module):
         out = self.relu(out)
         return out
 
+
 class ImprovedSRCNN(nn.Module):
     def __init__(self, scale_factor=2):
         super(ImprovedSRCNN, self).__init__()
 
         # Initial Feature Extraction
         self.initial_conv = nn.Sequential(
-            nn.Conv2d(3, 128, kernel_size=3, padding=1),
+            nn.Conv2d(3, 128, kernel_size=9, padding=4),  # changed kernel to 9 and padding to 4
             nn.ReLU(inplace=False)
         )
 
         # Deep residual blocks
         self.residual_layers = nn.ModuleList([
-            EnhancedResidualBlock(128) for _ in range(8)
+            EnhancedResidualBlock(128) for _ in range(10)  # from 8 to 10
         ])
 
         # Feature fusion with same padding
@@ -61,7 +74,7 @@ class ImprovedSRCNN(nn.Module):
             nn.Conv2d(128, 128, kernel_size=3, padding=1),
             nn.BatchNorm2d(128),
             nn.ReLU(inplace=False),
-            SELayer(128)
+            SELayer(128, reduction=8)
         )
 
         # Progressive upsampling
@@ -77,9 +90,9 @@ class ImprovedSRCNN(nn.Module):
 
         # Final reconstruction
         self.final = nn.Sequential(
-            nn.Conv2d(128, 64, kernel_size=3, padding=1),
+            nn.Conv2d(128, 64, kernel_size=5, padding=2),
             nn.ReLU(inplace=False),
-            nn.Conv2d(64, 3, kernel_size=3, padding=1)
+            nn.Conv2d(64, 3, kernel_size=5, padding=2)
         )
 
     def forward(self, x):
@@ -94,8 +107,8 @@ class ImprovedSRCNN(nn.Module):
             features.append(x)
 
         # Feature fusion
-        x = torch.cat(features[-3:], dim=1)  # Use last 3 features
-        x = nn.Conv2d(128 * 3, 128, kernel_size=1).to(x.device)(x)  # 1x1 conv to reduce channels
+        x = torch.cat(features[-4:], dim=1)  # Use last 3 features
+        x = nn.Conv2d(128 * 4, 128, kernel_size=1).to(x.device)(x)  # 1x1 conv to reduce channels
         x = self.fusion(x)
 
         # Global residual connection
@@ -107,6 +120,7 @@ class ImprovedSRCNN(nn.Module):
 
         # Final reconstruction
         return self.final(x)
+
 
 class Discriminator(nn.Module):
     def __init__(self):
@@ -133,6 +147,7 @@ class Discriminator(nn.Module):
 
     def forward(self, x):
         return self.model(x).view(-1)
+
 
 class ContentLoss(nn.Module):
     def __init__(self):
