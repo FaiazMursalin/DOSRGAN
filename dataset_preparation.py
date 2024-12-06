@@ -207,6 +207,14 @@ if __name__ == '__main__':
             scale_factors=scale_factors,
             is_training=False
         )
+        # Prepare evaluation dataset (Set14) without patches
+        prepare_dataset(
+            source_dir='data/Set14/original',
+            output_base_dir=base_output_dir,
+            dataset_name='set14',
+            scale_factors=scale_factors,
+            is_training=False
+        )
 
         print("\nDataset preparation completed successfully!")
 
